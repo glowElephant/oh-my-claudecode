@@ -6654,7 +6654,7 @@ async function removeFileIfExists(filePath) {
   }
 }
 function sleep2(ms) {
-  return new Promise((resolve19) => setTimeout(resolve19, ms));
+  return new Promise((resolve20) => setTimeout(resolve20, ms));
 }
 var import_child_process9, fs5, fsPromises2, path5, import_url6, import_child_process10, import_util6, execFileAsync3, BRIDGE_SPAWN_TIMEOUT_MS, DEFAULT_GRACE_PERIOD_MS, SIGTERM_GRACE_MS, ownedBridgeSessionIds, USE_TCP_FALLBACK;
 var init_bridge_manager = __esm({
@@ -7683,7 +7683,7 @@ function withFileLockSync(lockPath, fn, opts) {
   }
 }
 function sleep3(ms) {
-  return new Promise((resolve19) => setTimeout(resolve19, ms));
+  return new Promise((resolve20) => setTimeout(resolve20, ms));
 }
 async function acquireFileLock(lockPath, opts) {
   const staleLockMs = opts?.staleLockMs ?? DEFAULT_STALE_LOCK_MS;
@@ -10102,6 +10102,104 @@ function resolveBestPluginSyncSource(targetRoots) {
   }
   return bestRoot;
 }
+function extractFrontmatterBlock(content) {
+  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  return match?.[1] ?? null;
+}
+function getFrontmatterStringValue(metadata, key) {
+  const value = metadata[key];
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+function normalizeCompactSkillDescription(description) {
+  const normalized = description.replace(/\s+/g, " ").trim();
+  if (normalized.length <= 240) {
+    return normalized;
+  }
+  return `${normalized.slice(0, 237).trimEnd()}...`;
+}
+function upsertYamlStringField(frontmatter, key, value) {
+  const escaped = JSON.stringify(value);
+  const line = `${key}: ${escaped}`;
+  const pattern = new RegExp(`^${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:.*$`, "m");
+  if (pattern.test(frontmatter)) {
+    return frontmatter.replace(pattern, line);
+  }
+  return `${frontmatter.trimEnd()}
+${line}`;
+}
+function renderCompactPluginSkillShim(skillDirName, content) {
+  const parsed = parseFrontmatter2(content);
+  let frontmatter = extractFrontmatterBlock(content) ?? `name: ${skillDirName}`;
+  const rawDescription = getFrontmatterStringValue(parsed.metadata, "short_description") ?? getFrontmatterStringValue(parsed.metadata, "description") ?? `Invoke the ${skillDirName} OMC skill.`;
+  const description = normalizeCompactSkillDescription(rawDescription);
+  const fullBodyRelPath = `../../${PLUGIN_FULL_SKILL_BODIES_DIR}/${skillDirName}/SKILL.md`;
+  frontmatter = upsertYamlStringField(frontmatter, "description", description);
+  frontmatter = upsertYamlStringField(frontmatter, "omc-full-body", fullBodyRelPath);
+  return `---
+${frontmatter.trim()}
+---
+
+${PLUGIN_COMPACT_SKILL_SHIM_MARKER}
+
+# ${skillDirName}
+
+This is a compact Claude Code plugin registry shim. It keeps startup skill descriptions small while preserving the full OMC skill body for on-demand invocation.
+
+When this skill is invoked, read and follow the full bundled instructions from:
+
+\`${fullBodyRelPath}\`
+
+Resolve that path relative to this SKILL.md file. If needed, locate the active plugin root via \`CLAUDE_PLUGIN_ROOT\` or \`OMC_PLUGIN_ROOT\` and open \`${PLUGIN_FULL_SKILL_BODIES_DIR}/${skillDirName}/SKILL.md\`.
+`;
+}
+function compactPluginSkillPayload(targetRoot) {
+  const skillsDir = (0, import_path49.join)(targetRoot, "skills");
+  const fullBodiesDir = (0, import_path49.join)(targetRoot, PLUGIN_FULL_SKILL_BODIES_DIR);
+  const errors = [];
+  let compacted = 0;
+  let totalBytes = 0;
+  if (!(0, import_fs37.existsSync)(skillsDir)) {
+    return { compacted, totalBytes, errors };
+  }
+  try {
+    (0, import_fs37.mkdirSync)(fullBodiesDir, { recursive: true });
+  } catch (error2) {
+    const message = error2 instanceof Error ? error2.message : String(error2);
+    return { compacted, totalBytes, errors: [`Failed to create ${fullBodiesDir}: ${message}`] };
+  }
+  const skillEntries = (() => {
+    try {
+      return (0, import_fs37.readdirSync)(skillsDir, { withFileTypes: true });
+    } catch (error2) {
+      const message = error2 instanceof Error ? error2.message : String(error2);
+      errors.push(`Failed to read plugin skills from ${skillsDir}: ${message}`);
+      return null;
+    }
+  })();
+  if (!skillEntries) {
+    return { compacted, totalBytes, errors };
+  }
+  for (const entry of skillEntries) {
+    if (!entry.isDirectory()) continue;
+    const skillDir = (0, import_path49.join)(skillsDir, entry.name);
+    const skillPath = (0, import_path49.join)(skillDir, "SKILL.md");
+    if (!(0, import_fs37.existsSync)(skillPath)) continue;
+    try {
+      const content = (0, import_fs37.readFileSync)(skillPath, "utf-8");
+      const archivedSkillDir = (0, import_path49.join)(fullBodiesDir, entry.name);
+      (0, import_fs37.rmSync)(archivedSkillDir, { recursive: true, force: true });
+      (0, import_fs37.cpSync)(skillDir, archivedSkillDir, { recursive: true, force: true });
+      const shim = renderCompactPluginSkillShim(entry.name, content);
+      (0, import_fs37.writeFileSync)(skillPath, shim);
+      totalBytes += Buffer.byteLength(shim, "utf-8");
+      compacted += 1;
+    } catch (error2) {
+      const message = error2 instanceof Error ? error2.message : String(error2);
+      errors.push(`Failed to compact plugin skill ${entry.name}: ${message}`);
+    }
+  }
+  return { compacted, totalBytes, errors };
+}
 function copyPluginSyncPayload(sourceRoot, targetRoots) {
   if (targetRoots.length === 0) {
     return { synced: false, errors: [] };
@@ -10110,6 +10208,7 @@ function copyPluginSyncPayload(sourceRoot, targetRoots) {
   const errors = [];
   for (const targetRoot of targetRoots) {
     let copiedToTarget = false;
+    let copiedSkills = false;
     for (const entry of PLUGIN_SYNC_PAYLOAD) {
       const sourcePath = (0, import_path49.join)(sourceRoot, entry);
       if (!(0, import_fs37.existsSync)(sourcePath)) {
@@ -10121,10 +10220,15 @@ function copyPluginSyncPayload(sourceRoot, targetRoots) {
           force: true
         });
         copiedToTarget = true;
+        copiedSkills = copiedSkills || entry === "skills";
       } catch (error2) {
         const message = error2 instanceof Error ? error2.message : String(error2);
         errors.push(`Failed to sync ${entry} to ${targetRoot}: ${message}`);
       }
+    }
+    if (copiedSkills) {
+      const compactResult = compactPluginSkillPayload(targetRoot);
+      errors.push(...compactResult.errors);
     }
     synced = synced || copiedToTarget;
   }
@@ -10758,7 +10862,7 @@ function getInstallInfo() {
     return null;
   }
 }
-var import_fs37, import_path49, import_url9, import_os11, import_child_process13, CLAUDE_CONFIG_DIR, AGENTS_DIR, COMMANDS_DIR, SKILLS_DIR, HOOKS_DIR, HUD_DIR, SETTINGS_FILE, VERSION_FILE, OMC_MANAGED_SKILL_MARKER, CORE_COMMANDS, VERSION, OMC_VERSION_MARKER_PATTERN, CC_NATIVE_COMMANDS, SKININTHEGAMEBROS_ONLY_SKILLS, OMC_HOOK_FILENAMES, STANDALONE_HOOK_TEMPLATE_FILES, PLUGIN_SYNC_PAYLOAD;
+var import_fs37, import_path49, import_url9, import_os11, import_child_process13, CLAUDE_CONFIG_DIR, AGENTS_DIR, COMMANDS_DIR, SKILLS_DIR, HOOKS_DIR, HUD_DIR, SETTINGS_FILE, VERSION_FILE, OMC_MANAGED_SKILL_MARKER, PLUGIN_FULL_SKILL_BODIES_DIR, PLUGIN_COMPACT_SKILL_SHIM_MARKER, CORE_COMMANDS, VERSION, OMC_VERSION_MARKER_PATTERN, CC_NATIVE_COMMANDS, SKININTHEGAMEBROS_ONLY_SKILLS, OMC_HOOK_FILENAMES, STANDALONE_HOOK_TEMPLATE_FILES, PLUGIN_SYNC_PAYLOAD;
 var init_installer = __esm({
   "src/installer/index.ts"() {
     "use strict";
@@ -10786,6 +10890,8 @@ var init_installer = __esm({
     SETTINGS_FILE = (0, import_path49.join)(CLAUDE_CONFIG_DIR, "settings.json");
     VERSION_FILE = (0, import_path49.join)(CLAUDE_CONFIG_DIR, ".omc-version.json");
     OMC_MANAGED_SKILL_MARKER = ".omc-managed";
+    PLUGIN_FULL_SKILL_BODIES_DIR = "skill-bodies";
+    PLUGIN_COMPACT_SKILL_SHIM_MARKER = "<!-- OMC:COMPACT-PLUGIN-SKILL -->";
     CORE_COMMANDS = [];
     VERSION = getRuntimePackageVersion();
     OMC_VERSION_MARKER_PATTERN = /<!-- OMC:VERSION:([^\s]+) -->/;
@@ -24392,7 +24498,7 @@ async function pollTelegram(config2, state, rateLimiter) {
   try {
     const offset = state.telegramLastUpdateId ? state.telegramLastUpdateId + 1 : 0;
     const path22 = `/bot${config2.telegramBotToken}/getUpdates?offset=${offset}&timeout=0`;
-    const updates = await new Promise((resolve19, reject) => {
+    const updates = await new Promise((resolve20, reject) => {
       const req = (0, import_https.request)(
         {
           hostname: "api.telegram.org",
@@ -24409,7 +24515,7 @@ async function pollTelegram(config2, state, rateLimiter) {
             try {
               const body = JSON.parse(Buffer.concat(chunks).toString("utf-8"));
               if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-                resolve19(body.result || []);
+                resolve20(body.result || []);
               } else {
                 reject(new Error(`HTTP ${res.statusCode}`));
               }
@@ -24473,7 +24579,7 @@ async function pollTelegram(config2, state, rateLimiter) {
             text: "Injected into Claude Code session.",
             reply_to_message_id: msg.message_id
           });
-          await new Promise((resolve19) => {
+          await new Promise((resolve20) => {
             const replyReq = (0, import_https.request)(
               {
                 hostname: "api.telegram.org",
@@ -24488,13 +24594,13 @@ async function pollTelegram(config2, state, rateLimiter) {
               },
               (res) => {
                 res.resume();
-                resolve19();
+                resolve20();
               }
             );
-            replyReq.on("error", () => resolve19());
+            replyReq.on("error", () => resolve20());
             replyReq.on("timeout", () => {
               replyReq.destroy();
-              resolve19();
+              resolve20();
             });
             replyReq.write(replyBody);
             replyReq.end();
@@ -24631,13 +24737,13 @@ async function pollLoop() {
         }
       }
       writeDaemonState(state);
-      await new Promise((resolve19) => setTimeout(resolve19, config2.pollIntervalMs));
+      await new Promise((resolve20) => setTimeout(resolve20, config2.pollIntervalMs));
     } catch (error2) {
       state.errors++;
       state.lastError = redactTokens(error2 instanceof Error ? error2.message : String(error2));
       log(`Poll error: ${state.lastError}`);
       writeDaemonState(state);
-      await new Promise((resolve19) => setTimeout(resolve19, config2.pollIntervalMs * 2));
+      await new Promise((resolve20) => setTimeout(resolve20, config2.pollIntervalMs * 2));
     }
   }
   log("Poll loop ended");
@@ -26209,7 +26315,7 @@ async function triggerStopCallbacks(metrics, _input, options = {}) {
   try {
     await Promise.race([
       Promise.allSettled(promises),
-      new Promise((resolve19) => setTimeout(resolve19, 5e3))
+      new Promise((resolve20) => setTimeout(resolve20, 5e3))
     ]);
   } catch (error2) {
     console.error("[stop-callback] Callback execution error:", error2);
@@ -26499,7 +26605,7 @@ async function sendTelegram2(config2, payload) {
       text: payload.message,
       parse_mode: config2.parseMode || "Markdown"
     });
-    const result = await new Promise((resolve19) => {
+    const result = await new Promise((resolve20) => {
       const req = (0, import_https2.request)(
         {
           hostname: "api.telegram.org",
@@ -26526,9 +26632,9 @@ async function sendTelegram2(config2, payload) {
                 }
               } catch {
               }
-              resolve19({ platform: "telegram", success: true, messageId });
+              resolve20({ platform: "telegram", success: true, messageId });
             } else {
-              resolve19({
+              resolve20({
                 platform: "telegram",
                 success: false,
                 error: `HTTP ${res.statusCode}`
@@ -26538,11 +26644,11 @@ async function sendTelegram2(config2, payload) {
         }
       );
       req.on("error", (e) => {
-        resolve19({ platform: "telegram", success: false, error: e.message });
+        resolve20({ platform: "telegram", success: false, error: e.message });
       });
       req.on("timeout", () => {
         req.destroy();
-        resolve19({
+        resolve20({
           platform: "telegram",
           success: false,
           error: "Request timeout"
@@ -26788,9 +26894,9 @@ async function dispatchNotifications(config2, event, payload, platformMessages) 
           }
         )
       ),
-      new Promise((resolve19) => {
+      new Promise((resolve20) => {
         timer = setTimeout(
-          () => resolve19([
+          () => resolve20([
             {
               platform: "unknown",
               success: false,
@@ -27579,7 +27685,7 @@ async function withMailboxLock(teamName, workerName2, cwd2, fn) {
   while (Date.now() < deadline) {
     const result = await withLock(lockDir, fn);
     if (result.ok) return result.value;
-    await new Promise((resolve19) => setTimeout(resolve19, delayMs));
+    await new Promise((resolve20) => setTimeout(resolve20, delayMs));
     delayMs = Math.min(delayMs * 2, 200);
   }
   throw new Error(`Failed to acquire mailbox lock for ${workerName2} after ${timeoutMs}ms`);
@@ -27685,7 +27791,7 @@ async function teamCreateTask(teamName, task, cwd2) {
       return created;
     });
     if (result.ok) return result.value;
-    await new Promise((resolve19) => setTimeout(resolve19, delayMs));
+    await new Promise((resolve20) => setTimeout(resolve20, delayMs));
     delayMs = Math.min(delayMs * 2, 200);
   }
   throw new Error(`Failed to acquire task creation lock for team ${teamName} after ${timeoutMs}ms`);
@@ -27725,7 +27831,7 @@ async function teamUpdateTask(teamName, taskId, updates, cwd2) {
       return merged;
     });
     if (result.ok) return result.value;
-    await new Promise((resolve19) => setTimeout(resolve19, delayMs));
+    await new Promise((resolve20) => setTimeout(resolve20, delayMs));
     delayMs = Math.min(delayMs * 2, 200);
   }
   throw new Error(`Failed to acquire task update lock for task ${taskId} in team ${teamName} after ${timeoutMs}ms`);
@@ -30046,7 +30152,7 @@ async function withDispatchLock(teamName, cwd2, fn) {
         );
       }
       const jitter = 0.5 + Math.random() * 0.5;
-      await new Promise((resolve19) => setTimeout(resolve19, Math.floor(pollMs * jitter)));
+      await new Promise((resolve20) => setTimeout(resolve20, Math.floor(pollMs * jitter)));
       pollMs = Math.min(pollMs * 2, DISPATCH_LOCK_MAX_POLL_MS);
     }
   }
@@ -32217,8 +32323,8 @@ ${dirtyFiles.map((f) => `- \`${f}\``).join("\n")}`;
               return false;
             }
           })(),
-          new Promise((resolve19) => {
-            const t = setTimeout(() => resolve19(false), remaining);
+          new Promise((resolve20) => {
+            const t = setTimeout(() => resolve20(false), remaining);
             if (typeof t.unref === "function") t.unref();
           })
         ]);
@@ -32557,7 +32663,7 @@ async function waitForWorkerStartupEvidence(teamName, workerName2, taskId, cwd2,
       return true;
     }
     if (attempt < attempts) {
-      await new Promise((resolve19) => setTimeout(resolve19, delayMs));
+      await new Promise((resolve20) => setTimeout(resolve20, delayMs));
     }
   }
   return false;
@@ -34050,7 +34156,7 @@ async function readJsonSafe5(filePath) {
         return null;
       }
     }
-    await new Promise((resolve19) => setTimeout(resolve19, 25));
+    await new Promise((resolve20) => setTimeout(resolve20, 25));
   }
   return null;
 }
@@ -34168,7 +34274,7 @@ async function nextPendingTaskIndex(runtime) {
     let task = await readTask(root2, taskId);
     if (!task) {
       for (let attempt = 1; attempt < transientReadRetryAttempts; attempt++) {
-        await new Promise((resolve19) => setTimeout(resolve19, transientReadRetryDelayMs));
+        await new Promise((resolve20) => setTimeout(resolve20, transientReadRetryDelayMs));
         task = await readTask(root2, taskId);
         if (task) break;
       }
@@ -42365,7 +42471,7 @@ function validateCredentials(creds) {
   return !isCredentialExpired(creds);
 }
 function refreshAccessToken(refreshToken) {
-  return new Promise((resolve19) => {
+  return new Promise((resolve20) => {
     const clientId = process.env.CLAUDE_CODE_OAUTH_CLIENT_ID || DEFAULT_OAUTH_CLIENT_ID;
     const body = new URLSearchParams({
       grant_type: "refresh_token",
@@ -42393,7 +42499,7 @@ function refreshAccessToken(refreshToken) {
             try {
               const parsed = JSON.parse(data);
               if (parsed.access_token) {
-                resolve19({
+                resolve20({
                   accessToken: parsed.access_token,
                   refreshToken: parsed.refresh_token || refreshToken,
                   expiresAt: parsed.expires_in ? Date.now() + parsed.expires_in * 1e3 : parsed.expires_at
@@ -42406,20 +42512,20 @@ function refreshAccessToken(refreshToken) {
           if (process.env.OMC_DEBUG) {
             console.error(`[usage-api] Token refresh failed: HTTP ${res.statusCode}`);
           }
-          resolve19(null);
+          resolve20(null);
         });
       }
     );
-    req.on("error", () => resolve19(null));
+    req.on("error", () => resolve20(null));
     req.on("timeout", () => {
       req.destroy();
-      resolve19(null);
+      resolve20(null);
     });
     req.end(body);
   });
 }
 function fetchUsageFromApi(accessToken) {
-  return new Promise((resolve19) => {
+  return new Promise((resolve20) => {
     const req = import_https3.default.request(
       {
         hostname: "api.anthropic.com",
@@ -42440,41 +42546,41 @@ function fetchUsageFromApi(accessToken) {
         res.on("end", () => {
           if (res.statusCode === 200) {
             try {
-              resolve19({ data: JSON.parse(data) });
+              resolve20({ data: JSON.parse(data) });
             } catch {
-              resolve19({ data: null });
+              resolve20({ data: null });
             }
           } else if (res.statusCode === 429) {
             if (process.env.OMC_DEBUG) {
               console.error(`[usage-api] Anthropic API returned 429 (rate limited)`);
             }
-            resolve19({ data: null, rateLimited: true });
+            resolve20({ data: null, rateLimited: true });
           } else {
-            resolve19({ data: null });
+            resolve20({ data: null });
           }
         });
       }
     );
-    req.on("error", () => resolve19({ data: null }));
+    req.on("error", () => resolve20({ data: null }));
     req.on("timeout", () => {
       req.destroy();
-      resolve19({ data: null });
+      resolve20({ data: null });
     });
     req.end();
   });
 }
 function fetchUsageFromZai() {
-  return new Promise((resolve19) => {
+  return new Promise((resolve20) => {
     const baseUrl = process.env.ANTHROPIC_BASE_URL;
     const authToken = process.env.ANTHROPIC_AUTH_TOKEN;
     if (!baseUrl || !authToken) {
-      resolve19({ data: null });
+      resolve20({ data: null });
       return;
     }
     const validation = validateAnthropicBaseUrl(baseUrl);
     if (!validation.allowed) {
       console.error(`[SSRF Guard] Blocking usage API call: ${validation.reason}`);
-      resolve19({ data: null });
+      resolve20({ data: null });
       return;
     }
     try {
@@ -42502,29 +42608,29 @@ function fetchUsageFromZai() {
           res.on("end", () => {
             if (res.statusCode === 200) {
               try {
-                resolve19({ data: JSON.parse(data) });
+                resolve20({ data: JSON.parse(data) });
               } catch {
-                resolve19({ data: null });
+                resolve20({ data: null });
               }
             } else if (res.statusCode === 429) {
               if (process.env.OMC_DEBUG) {
                 console.error(`[usage-api] z.ai API returned 429 (rate limited)`);
               }
-              resolve19({ data: null, rateLimited: true });
+              resolve20({ data: null, rateLimited: true });
             } else {
-              resolve19({ data: null });
+              resolve20({ data: null });
             }
           });
         }
       );
-      req.on("error", () => resolve19({ data: null }));
+      req.on("error", () => resolve20({ data: null }));
       req.on("timeout", () => {
         req.destroy();
-        resolve19({ data: null });
+        resolve20({ data: null });
       });
       req.end();
     } catch {
-      resolve19({ data: null });
+      resolve20({ data: null });
     }
   });
 }
@@ -42691,16 +42797,16 @@ function parseZaiResponse(response) {
   return result;
 }
 function fetchUsageFromMinimax(apiKey) {
-  return new Promise((resolve19) => {
+  return new Promise((resolve20) => {
     const baseUrl = process.env.ANTHROPIC_BASE_URL;
     if (!baseUrl) {
-      resolve19({ data: null });
+      resolve20({ data: null });
       return;
     }
     const validation = validateAnthropicBaseUrl(baseUrl);
     if (!validation.allowed) {
       console.error(`[SSRF Guard] Blocking usage API call: ${validation.reason}`);
-      resolve19({ data: null });
+      resolve20({ data: null });
       return;
     }
     try {
@@ -42727,29 +42833,29 @@ function fetchUsageFromMinimax(apiKey) {
           res.on("end", () => {
             if (res.statusCode === 200) {
               try {
-                resolve19({ data: JSON.parse(data) });
+                resolve20({ data: JSON.parse(data) });
               } catch {
-                resolve19({ data: null });
+                resolve20({ data: null });
               }
             } else if (res.statusCode === 429) {
               if (process.env.OMC_DEBUG) {
                 console.error(`[usage-api] MiniMax API returned 429 (rate limited)`);
               }
-              resolve19({ data: null, rateLimited: true });
+              resolve20({ data: null, rateLimited: true });
             } else {
-              resolve19({ data: null });
+              resolve20({ data: null });
             }
           });
         }
       );
-      req.on("error", () => resolve19({ data: null }));
+      req.on("error", () => resolve20({ data: null }));
       req.on("timeout", () => {
         req.destroy();
-        resolve19({ data: null });
+        resolve20({ data: null });
       });
       req.end();
     } catch {
-      resolve19({ data: null });
+      resolve20({ data: null });
     }
   });
 }
@@ -43887,7 +43993,7 @@ function isCacheValid2(cache) {
   return Date.now() - cache.timestamp < CACHE_TTL_MS2;
 }
 function spawnWithTimeout(cmd, timeoutMs) {
-  return new Promise((resolve19, reject) => {
+  return new Promise((resolve20, reject) => {
     const [executable, ...args] = Array.isArray(cmd) ? cmd : ["sh", "-c", cmd];
     const child = (0, import_child_process35.spawn)(executable, args, { stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
@@ -43910,7 +44016,7 @@ function spawnWithTimeout(cmd, timeoutMs) {
       clearTimeout(timer);
       if (!timedOut) {
         if (code === 0) {
-          resolve19(stdout);
+          resolve20(stdout);
         } else {
           reject(new Error(`Command exited with code ${code}`));
         }
@@ -49748,7 +49854,7 @@ var require_compile = __commonJS2((exports2) => {
     const schOrFunc = root2.refs[ref];
     if (schOrFunc)
       return schOrFunc;
-    let _sch = resolve19.call(this, root2, ref);
+    let _sch = resolve20.call(this, root2, ref);
     if (_sch === void 0) {
       const schema = (_a = root2.localRefs) === null || _a === void 0 ? void 0 : _a[ref];
       const { schemaId } = this.opts;
@@ -49775,7 +49881,7 @@ var require_compile = __commonJS2((exports2) => {
   function sameSchemaEnv(s1, s2) {
     return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
   }
-  function resolve19(root2, ref) {
+  function resolve20(root2, ref) {
     let sch;
     while (typeof (sch = this.refs[ref]) == "string")
       ref = sch;
@@ -50273,54 +50379,54 @@ var require_fast_uri = __commonJS2((exports2, module2) => {
     }
     return uri;
   }
-  function resolve19(baseURI, relativeURI, options) {
+  function resolve20(baseURI, relativeURI, options) {
     const schemelessOptions = Object.assign({ scheme: "null" }, options);
     const resolved = resolveComponents(parse62(baseURI, schemelessOptions), parse62(relativeURI, schemelessOptions), schemelessOptions, true);
     return serialize(resolved, { ...schemelessOptions, skipEscape: true });
   }
-  function resolveComponents(base, relative16, options, skipNormalization) {
+  function resolveComponents(base, relative17, options, skipNormalization) {
     const target = {};
     if (!skipNormalization) {
       base = parse62(serialize(base, options), options);
-      relative16 = parse62(serialize(relative16, options), options);
+      relative17 = parse62(serialize(relative17, options), options);
     }
     options = options || {};
-    if (!options.tolerant && relative16.scheme) {
-      target.scheme = relative16.scheme;
-      target.userinfo = relative16.userinfo;
-      target.host = relative16.host;
-      target.port = relative16.port;
-      target.path = removeDotSegments(relative16.path || "");
-      target.query = relative16.query;
+    if (!options.tolerant && relative17.scheme) {
+      target.scheme = relative17.scheme;
+      target.userinfo = relative17.userinfo;
+      target.host = relative17.host;
+      target.port = relative17.port;
+      target.path = removeDotSegments(relative17.path || "");
+      target.query = relative17.query;
     } else {
-      if (relative16.userinfo !== void 0 || relative16.host !== void 0 || relative16.port !== void 0) {
-        target.userinfo = relative16.userinfo;
-        target.host = relative16.host;
-        target.port = relative16.port;
-        target.path = removeDotSegments(relative16.path || "");
-        target.query = relative16.query;
+      if (relative17.userinfo !== void 0 || relative17.host !== void 0 || relative17.port !== void 0) {
+        target.userinfo = relative17.userinfo;
+        target.host = relative17.host;
+        target.port = relative17.port;
+        target.path = removeDotSegments(relative17.path || "");
+        target.query = relative17.query;
       } else {
-        if (!relative16.path) {
+        if (!relative17.path) {
           target.path = base.path;
-          if (relative16.query !== void 0) {
-            target.query = relative16.query;
+          if (relative17.query !== void 0) {
+            target.query = relative17.query;
           } else {
             target.query = base.query;
           }
         } else {
-          if (relative16.path.charAt(0) === "/") {
-            target.path = removeDotSegments(relative16.path);
+          if (relative17.path.charAt(0) === "/") {
+            target.path = removeDotSegments(relative17.path);
           } else {
             if ((base.userinfo !== void 0 || base.host !== void 0 || base.port !== void 0) && !base.path) {
-              target.path = "/" + relative16.path;
+              target.path = "/" + relative17.path;
             } else if (!base.path) {
-              target.path = relative16.path;
+              target.path = relative17.path;
             } else {
-              target.path = base.path.slice(0, base.path.lastIndexOf("/") + 1) + relative16.path;
+              target.path = base.path.slice(0, base.path.lastIndexOf("/") + 1) + relative17.path;
             }
             target.path = removeDotSegments(target.path);
           }
-          target.query = relative16.query;
+          target.query = relative17.query;
         }
         target.userinfo = base.userinfo;
         target.host = base.host;
@@ -50328,7 +50434,7 @@ var require_fast_uri = __commonJS2((exports2, module2) => {
       }
       target.scheme = base.scheme;
     }
-    target.fragment = relative16.fragment;
+    target.fragment = relative17.fragment;
     return target;
   }
   function equal(uriA, uriB, options) {
@@ -50506,7 +50612,7 @@ var require_fast_uri = __commonJS2((exports2, module2) => {
   var fastUri = {
     SCHEMES,
     normalize: normalize12,
-    resolve: resolve19,
+    resolve: resolve20,
     resolveComponents,
     equal,
     serialize,
@@ -64873,7 +64979,7 @@ var Protocol = class {
           return;
         }
         const pollInterval = (_c = (_a = task2.pollInterval) !== null && _a !== void 0 ? _a : (_b = this._options) === null || _b === void 0 ? void 0 : _b.defaultTaskPollInterval) !== null && _c !== void 0 ? _c : 1e3;
-        await new Promise((resolve19) => setTimeout(resolve19, pollInterval));
+        await new Promise((resolve20) => setTimeout(resolve20, pollInterval));
         (_d = options === null || options === void 0 ? void 0 : options.signal) === null || _d === void 0 || _d.throwIfAborted();
       }
     } catch (error2) {
@@ -64885,7 +64991,7 @@ var Protocol = class {
   }
   request(request, resultSchema, options) {
     const { relatedRequestId, resumptionToken, onresumptiontoken, task, relatedTask } = options !== null && options !== void 0 ? options : {};
-    return new Promise((resolve19, reject) => {
+    return new Promise((resolve20, reject) => {
       var _a, _b, _c, _d, _e, _f, _g;
       const earlyReject = (error2) => {
         reject(error2);
@@ -64966,7 +65072,7 @@ var Protocol = class {
           if (!parseResult.success) {
             reject(parseResult.error);
           } else {
-            resolve19(parseResult.data);
+            resolve20(parseResult.data);
           }
         } catch (error2) {
           reject(error2);
@@ -65163,12 +65269,12 @@ var Protocol = class {
       }
     } catch (_d) {
     }
-    return new Promise((resolve19, reject) => {
+    return new Promise((resolve20, reject) => {
       if (signal.aborted) {
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
         return;
       }
-      const timeoutId = setTimeout(resolve19, interval);
+      const timeoutId = setTimeout(resolve20, interval);
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
@@ -65967,7 +66073,7 @@ var McpServer = class {
     let task = createTaskResult.task;
     const pollInterval = (_a = task.pollInterval) !== null && _a !== void 0 ? _a : 5e3;
     while (task.status !== "completed" && task.status !== "failed" && task.status !== "cancelled") {
-      await new Promise((resolve19) => setTimeout(resolve19, pollInterval));
+      await new Promise((resolve20) => setTimeout(resolve20, pollInterval));
       const updatedTask = await extra.taskStore.getTask(taskId);
       if (!updatedTask) {
         throw new McpError(ErrorCode.InternalError, `Task ${taskId} not found during polling`);
@@ -71036,7 +71142,7 @@ var LspClient = class _LspClient {
 Install with: ${this.serverConfig.installHint}`
       );
     }
-    return new Promise((resolve19, reject) => {
+    return new Promise((resolve20, reject) => {
       const command = this.devContainerContext ? "docker" : this.serverConfig.command;
       const args = this.devContainerContext ? ["exec", "-i", "-w", this.devContainerContext.containerWorkspaceRoot, this.devContainerContext.containerId, this.serverConfig.command, ...this.serverConfig.args] : this.serverConfig.args;
       this.process = (0, import_child_process4.spawn)(command, args, {
@@ -71063,7 +71169,7 @@ Install with: ${this.serverConfig.installHint}`
       });
       this.initialize().then(() => {
         this.initialized = true;
-        resolve19();
+        resolve20();
       }).catch(reject);
     });
   }
@@ -71207,13 +71313,13 @@ Install with: ${this.serverConfig.installHint}`
     const message = `Content-Length: ${Buffer.byteLength(content)}\r
 \r
 ${content}`;
-    return new Promise((resolve19, reject) => {
+    return new Promise((resolve20, reject) => {
       const timeoutHandle = setTimeout(() => {
         this.pendingRequests.delete(id);
         reject(new Error(`LSP request '${method}' timed out after ${effectiveTimeout}ms`));
       }, effectiveTimeout);
       this.pendingRequests.set(id, {
-        resolve: resolve19,
+        resolve: resolve20,
         reject,
         timeout: timeoutHandle
       });
@@ -71289,7 +71395,7 @@ ${content}`;
       }
     });
     this.openDocuments.add(hostUri);
-    await new Promise((resolve19) => setTimeout(resolve19, 100));
+    await new Promise((resolve20) => setTimeout(resolve20, 100));
   }
   /**
    * Close a document
@@ -71450,13 +71556,13 @@ ${content}`;
     if (this.diagnostics.has(uri)) {
       return Promise.resolve();
     }
-    return new Promise((resolve19) => {
+    return new Promise((resolve20) => {
       let resolved = false;
       const timer = setTimeout(() => {
         if (!resolved) {
           resolved = true;
           this.diagnosticWaiters.delete(uri);
-          resolve19();
+          resolve20();
         }
       }, timeoutMs);
       const existing = this.diagnosticWaiters.get(uri) || [];
@@ -71464,7 +71570,7 @@ ${content}`;
         if (!resolved) {
           resolved = true;
           clearTimeout(timer);
-          resolve19();
+          resolve20();
         }
       });
       this.diagnosticWaiters.set(uri, existing);
@@ -73361,7 +73467,7 @@ var SessionLock = class {
   }
 };
 function sleep(ms) {
-  return new Promise((resolve19) => setTimeout(resolve19, ms));
+  return new Promise((resolve20) => setTimeout(resolve20, ms));
 }
 
 // src/tools/python-repl/socket-client.ts
@@ -73391,7 +73497,7 @@ var JsonRpcError = class extends Error {
   }
 };
 async function sendSocketRequest(socketPath, method, params, timeout = 6e4) {
-  return new Promise((resolve19, reject) => {
+  return new Promise((resolve20, reject) => {
     const id = (0, import_crypto5.randomUUID)();
     const request = {
       jsonrpc: "2.0",
@@ -73481,7 +73587,7 @@ async function sendSocketRequest(socketPath, method, params, timeout = 6e4) {
           }
           if (!settled) {
             settled = true;
-            resolve19(response.result);
+            resolve20(response.result);
           }
         } catch (e) {
           if (!settled) {
@@ -75975,7 +76081,7 @@ function mergeArrays(fieldName, base, incoming) {
       return mergeScalarArray(base, incoming);
   }
 }
-function mergeByKey(base, incoming, keyFn, resolve19) {
+function mergeByKey(base, incoming, keyFn, resolve20) {
   const seen = /* @__PURE__ */ new Map();
   for (const item of base) {
     seen.set(keyFn(item), item);
@@ -75984,7 +76090,7 @@ function mergeByKey(base, incoming, keyFn, resolve19) {
     const key = keyFn(item);
     const existing = seen.get(key);
     if (existing) {
-      seen.set(key, resolve19(existing, item));
+      seen.set(key, resolve20(existing, item));
     } else {
       seen.set(key, item);
     }
@@ -84648,6 +84754,37 @@ function getDeepInterviewAmbiguityThreshold() {
 function formatThresholdPercent(threshold) {
   return `${(threshold * 100).toFixed(2).replace(/\.?0+$/, "")}%`;
 }
+function pathLooksWindows(value) {
+  return /^[a-zA-Z]:[\\/]/.test(value) || value.startsWith("\\\\");
+}
+function isPathInsideOrEqual(parentPath, candidatePath) {
+  const pathApi = pathLooksWindows(parentPath) || pathLooksWindows(candidatePath) ? import_path104.win32 : { relative: import_path104.relative, isAbsolute: import_path104.isAbsolute };
+  const rel = pathApi.relative(parentPath, candidatePath);
+  return rel === "" || !rel.startsWith("..") && !pathApi.isAbsolute(rel);
+}
+function getFrontmatterString(metadata, key) {
+  const value = metadata[key];
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+function readSkillBodyOverride(skillPath, metadata, fallbackBody) {
+  const bodyPath = getFrontmatterString(metadata, "omc-full-body");
+  if (!bodyPath) {
+    return fallbackBody;
+  }
+  const skillDir = (0, import_path104.dirname)(skillPath);
+  const resolvedBodyPath = (0, import_path104.resolve)(skillDir, bodyPath);
+  const packageRoot = (0, import_path104.resolve)(getPackageDir5());
+  if (!isPathInsideOrEqual(packageRoot, resolvedBodyPath)) {
+    return fallbackBody;
+  }
+  try {
+    const fullContent = (0, import_fs86.readFileSync)(resolvedBodyPath, "utf-8");
+    const { body } = parseFrontmatter2(fullContent);
+    return body;
+  } catch {
+    return fallbackBody;
+  }
+}
 function applyDeepInterviewRuntimeSettings(template) {
   const threshold = getDeepInterviewAmbiguityThreshold();
   const percent = formatThresholdPercent(threshold);
@@ -84675,7 +84812,8 @@ function loadSkillFromFile(skillPath, skillName) {
     const resolvedName = metadata.name || skillName;
     const safePrimaryName = toSafeSkillName(resolvedName);
     const pipeline = parseSkillPipelineMetadata(metadata);
-    const renderedBody = renderBundledSkillBody(safePrimaryName, body);
+    const fullBody = readSkillBodyOverride(skillPath, metadata, body);
+    const renderedBody = renderBundledSkillBody(safePrimaryName, fullBody);
     const template = [
       renderedBody,
       renderSkillRuntimeGuidance(safePrimaryName),
@@ -85555,7 +85693,7 @@ async function pollLoop2(config2) {
       log2(`Poll error: ${state.lastError}`, config2);
       writeDaemonState2(state, config2);
     }
-    await new Promise((resolve19) => setTimeout(resolve19, config2.pollIntervalMs));
+    await new Promise((resolve20) => setTimeout(resolve20, config2.pollIntervalMs));
   }
 }
 function startDaemon(config2) {
@@ -88870,7 +89008,7 @@ async function ralphthonCommand(args) {
   console.log(source_default.gray("Orchestrator running. Press Ctrl+C to stop."));
 }
 function sleep5(ms) {
-  return new Promise((resolve19) => setTimeout(resolve19, ms));
+  return new Promise((resolve20) => setTimeout(resolve20, ms));
 }
 
 // src/cli/commands/teleport.ts
@@ -90377,15 +90515,15 @@ async function runHudWatchLoop(options) {
     if (shouldStop) {
       break;
     }
-    await new Promise((resolve19) => {
+    await new Promise((resolve20) => {
       const timer = setTimeout(() => {
         wakeSleep = null;
-        resolve19();
+        resolve20();
       }, options.intervalMs);
       wakeSleep = () => {
         clearTimeout(timer);
         wakeSleep = null;
-        resolve19();
+        resolve20();
       };
       timer.unref?.();
     });
