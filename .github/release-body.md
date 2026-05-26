@@ -1,17 +1,20 @@
-# oh-my-claudecode v4.14.3: hook/update hotfixes
+# oh-my-claudecode v4.14.3: Windows hook/update hotfixes
 
 ## Release Notes
 
-Hotfix release with **5 merged fixes** since v4.14.2.
+Hotfix release with **7 merged fixes** since v4.14.2.
 
 ### Highlights
 
+- Fixes native Windows plugin hooks still invoking `sh`/`find-node.sh` for Stop/UserPromptSubmit/etc. (#3118, #3119)
 - Restores native Windows SessionEnd hook launch behavior (#3115)
 - Keeps hook shutdown paths portable and quiet across shell/Windows paths (#3110)
 - Fixes update-check cache path consistency under the Claude config directory (#3112)
 
 ### Bug Fixes
 
+- **Fix native Windows plugin hook command rewriting for Stop/UserPromptSubmit/etc.** (#3118)
+- **Sync generated artifacts for the Windows hook rewrite** (#3119)
 - **Fix Windows SessionEnd hook command portability** (#3115)
 - **Fix update-check cache path consistency** (#3112)
 - **Fix native Claude Code version detection on Windows** (#3111)
